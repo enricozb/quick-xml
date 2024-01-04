@@ -2021,6 +2021,8 @@ use std::ops::Deref;
 pub(crate) const TEXT_KEY: &str = "$text";
 /// Data represented by any XML markup inside
 pub(crate) const VALUE_KEY: &str = "$value";
+/// Data represented by any XML markup inside, to be deserialized as a string
+pub(crate) const RAW_KEY: &str = "$raw";
 
 /// Decoded and concatenated content of consequent [`Text`] and [`CData`]
 /// events. _Consequent_ means that events should follow each other or be
@@ -2625,6 +2627,33 @@ where
     #[inline]
     fn read_string(&mut self) -> Result<Cow<'de, str>, DeError> {
         self.read_string_impl(true)
+    }
+
+    #[inline]
+    fn read_raw(&mut self) -> Result<String, DeError> {
+        // TODO: change to iterative approach
+        let mut raw = String::new();
+
+        loop {
+            if let DeEvent::End(_) = self.peek()? { break; }
+
+            match self.next()? {
+                DeEvent::Text(e) => raw.push_str(&e.text),
+                DeEvent::Start(e) => {
+                  raw.push_str(&format!("<{start}>", start = String::from_utf8_lossy(&e.buf)));
+                  raw.push_str(&self.read_raw()?);
+
+                  let DeEvent::End(e) = self.next()? else { unreachable!(); };
+
+                  raw.push_str(&format!("</{end}>", end = String::from_utf8_lossy(&e.name().0)));
+                }
+
+                DeEvent::End(_) => unreachable!(),
+                DeEvent::Eof => return Err(DeError::UnexpectedEof),
+            }
+        }
+
+        Ok(raw)
     }
 
     /// Consumes consequent [`Text`] and [`CData`] (both a referred below as a _text_)

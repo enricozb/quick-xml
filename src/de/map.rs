@@ -5,7 +5,7 @@ use crate::{
     de::resolver::EntityResolver,
     de::simple_type::SimpleTypeDeserializer,
     de::text::TextDeserializer,
-    de::{str2bool, DeEvent, Deserializer, XmlRead, TEXT_KEY, VALUE_KEY},
+    de::{str2bool, DeEvent, Deserializer, XmlRead, RAW_KEY, TEXT_KEY, VALUE_KEY},
     encoding::Decoder,
     errors::serialize::DeError,
     errors::Error,
@@ -146,6 +146,8 @@ enum ValueSource {
     /// [`name()`]: BytesStart::name()
     /// [`Content`]: Self::Content
     Nested,
+    /// Deserialize everything between start & end tags.
+    Raw,
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -192,6 +194,14 @@ where
     /// <tag>value for VALUE_KEY field<tag>
     /// ```
     has_value_field: bool,
+    /// If `true`, then the deserialized struct has a field with a special name:
+    /// [`RAW_KEY`]. That field should be deserialized as a string with the whole
+    /// content of an XML node, not including properties and tag name:
+    ///
+    /// ```xml
+    /// <tag>value for RAW_KEY field <with-tags/><tag>
+    /// ```
+    has_raw_field: bool,
 }
 
 impl<'de, 'd, R, E> ElementMapAccess<'de, 'd, R, E>
@@ -212,6 +222,7 @@ where
             source: ValueSource::Unknown,
             fields,
             has_value_field: fields.contains(&VALUE_KEY),
+            has_raw_field: fields.contains(&RAW_KEY),
         })
     }
 }
@@ -241,7 +252,29 @@ where
             let de =
                 QNameDeserializer::from_attr(QName(&slice[key]), decoder, &mut self.de.key_buf)?;
             seed.deserialize(de).map(Some)
+        } else if self.has_raw_field {
+            if let DeEvent::End(e) = self.de.peek()? {
+                // Stop iteration after reaching a closing tag
+                // The matching tag name is guaranteed by the reader if our
+                // deserializer implementation is correct
+                debug_assert_eq!(self.start.name(), e.name());
+                // Consume End
+                self.de.next()?;
+
+                return Ok(None);
+            }
+
+            // Otherwise, process everything until the end tag.
+
+            self.source = ValueSource::Raw;
+            // Deserialize `key` from special attribute name which means
+            // that value should be taken from the raw content of the
+            // XML node as a string
+            let de = BorrowedStrDeserializer::<DeError>::new(RAW_KEY);
+            seed.deserialize(de).map(Some)
         } else {
+            println!("debugging map value: {:?}", self.de.peek()?);
+
             // try getting from events (<key>value</key>)
             match self.de.peek()? {
                 // We shouldn't have both `$value` and `$text` fields in the same
@@ -353,12 +386,59 @@ where
                 map: self,
                 fixed_name: true,
             }),
+            // This arm processes the following XML shape:
+            // <any-tag>
+            //   <any>...</any>
+            // </any-tag>
+            // The whole xml represented by an `<any-tag>` element, the map key
+            // is implicit and equals to the `RAW_KEY` constant, and the value
+            // is a `Start` event (the value deserializer will see that event)
+            ValueSource::Raw => seed.deserialize(RawValueDeserializer {
+                map: self,
+            }),
+
             ValueSource::Unknown => Err(DeError::KeyNotRead),
         }
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+struct RawValueDeserializer<'de, 'd, 'm, R, E>
+where
+    R: XmlRead<'de>,
+    E: EntityResolver,
+{
+    map: &'m mut ElementMapAccess<'de, 'd, R, E>,
+}
+
+impl<'de, 'd, 'm, R, E> de::Deserializer<'de> for RawValueDeserializer<'de, 'd, 'm, R, E>
+where
+    R: XmlRead<'de>,
+    E: EntityResolver,
+{
+    type Error = DeError;
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+      V: Visitor<'de>,
+    {
+      visitor.visit_string(self.map.de.read_raw()?)
+    }
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+      Err(DeError::Custom(format!("fields named `{RAW_KEY}` can only deserialize into String")))
+    }
+}
 
 /// A deserializer for a value of map or struct. That deserializer slightly
 /// differently processes events for a primitive types and sequences than
