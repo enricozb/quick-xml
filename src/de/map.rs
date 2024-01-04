@@ -273,8 +273,6 @@ where
             let de = BorrowedStrDeserializer::<DeError>::new(RAW_KEY);
             seed.deserialize(de).map(Some)
         } else {
-            println!("debugging map value: {:?}", self.de.peek()?);
-
             // try getting from events (<key>value</key>)
             match self.de.peek()? {
                 // We shouldn't have both `$value` and `$text` fields in the same
@@ -432,7 +430,7 @@ where
       visitor.visit_string(self.map.de.read_raw()?)
     }
 
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
