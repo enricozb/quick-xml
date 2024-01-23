@@ -2638,7 +2638,7 @@ where
             if let DeEvent::End(_) = self.peek()? { break; }
 
             match self.next()? {
-                DeEvent::Text(e) => raw.push_str(&e.text),
+                DeEvent::Text(e) => raw.push_str(&crate::escape::escape(&e.text)),
                 DeEvent::Start(e) => {
                   raw.push_str(&format!("<{start}>", start = String::from_utf8_lossy(&e.buf)));
                   raw.push_str(&self.read_raw()?);
